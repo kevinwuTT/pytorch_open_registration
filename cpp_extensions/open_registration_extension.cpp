@@ -9,8 +9,15 @@
 #include <ATen/native/cpu/Loops.h>
 #include <ATen/native/DispatchStub.h>
 #include <ATen/EmptyTensor.h>
+#include <ATen/ops/empty_strided.h>
+#include <ATen/ops/view.h>
 
 #include <iostream>
+#include <string.h>
+
+#include "ttnn/device.hpp"
+
+#define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
 
 // This file contains the heavy lifting to add a new C++ backend
 // and integrate it directly into the PyTorch backend. It mainly involves:
@@ -26,7 +33,7 @@
 // basic dummy add function
 at::Tensor custom_add_Tensor(const at::Tensor & self, const at::Tensor & other, const at::Scalar & alpha) {
   const at::OptionalDeviceGuard device_guard(at::device_of(self));
-  std::cout << "Custom aten::add.Tensor() called!" << std::endl;
+  std::cout << __FILENAME__ << " Custom aten::add.Tensor() called!" << std::endl;
   // Since this custom device is just for testing, not bothering to implement kernels.
   return at::empty(self.sizes(), self.options());
 }
@@ -43,21 +50,28 @@ at::Tensor custom_add_Tensor(const at::Tensor & self, const at::Tensor & other, 
 // A dummy allocator for our custom device, that secretly uses the CPU
 struct DummyCustomAllocator final : at::Allocator {
   DummyCustomAllocator() = default;
+  // at::DataPtr allocate(size_t nbytes) override {
   at::DataPtr allocate(size_t nbytes) const override {
-    std::cout << "Custom allocator's allocate() called!" << std::endl;
+    std::cout << __FILENAME__ << " Custom allocator's allocate() called!" << std::endl;
     void* data = c10::alloc_cpu(nbytes);
     return {data, data, &ReportAndDelete, at::Device(at::DeviceType::PrivateUse1, 0)};
   }
+
+  // void copy_data(void* dest, const void* src, std::size_t count) const override {
+  //   std::cout << __FILENAME__ << " Custom copy copy_data() called!" << std::endl;
+  //   std::memcpy(dest, src, count);
+  // }
 
   static void ReportAndDelete(void* ptr) {
     if (!ptr) {
       return;
     }
-    std::cout << "Custom allocator's delete() called!" << std::endl;
+    std::cout << __FILENAME__ << " Custom allocator's delete() called!" << std::endl;
     c10::free_cpu(ptr);
   }
 
   at::DeleterFnPtr raw_deleter() const override {
+  // at::DeleterFnPtr raw_deleter() {
     return &ReportAndDelete;
   }
 };
@@ -217,7 +231,9 @@ C10_REGISTER_GUARD_IMPL(PrivateUse1, DummyDeviceGuardImpl);
 // a fresh at::Tensor object, that properly stores a TensorImpl of your subclass.
 at::Tensor custom_empty_memory_format(at::IntArrayRef size, c10::optional<at::ScalarType> dtype, c10::optional<at::Layout> layout, c10::optional<at::Device> device, c10::optional<bool> pin_memory, c10::optional<at::MemoryFormat> memory_format) {
   const at::OptionalDeviceGuard device_guard(device);
-  std::cout << "Custom aten::empty.memory_format() called!" << std::endl;
+  std::cout << __FILENAME__ << " Custom aten::empty.memory_format() called!" << std::endl;
+  const auto device_id = 0;
+  auto& ttnn_device = ttnn::open_device(device_id);
   constexpr c10::DispatchKeySet private_use_ks(c10::DispatchKey::PrivateUse1);
   return at::detail::empty_generic(size, &global_custom_alloc, private_use_ks, c10::dtype_or_default(dtype), memory_format);
 }
@@ -226,13 +242,15 @@ at::Tensor & custom_fill__scalar(at::Tensor & self, const at::Scalar & value) {
   const at::OptionalDeviceGuard device_guard(at::device_of(self));
   // Not bothering to implement.
   // Should fill the tensor's data with "value".
+  std::cout << self << std::endl;
+
   return self;
 }
 
 // basic dummy copy_() function, so we can copy from the custom device to/from CPU
 at::Tensor custom__copy_from(const at::Tensor& self, const at::Tensor& dst, bool non_blocking) {
   const at::OptionalDeviceGuard device_guard(at::device_of(self));
-  std::cout << "Custom aten::_copy_from() called!" << std::endl;
+  std::cout << __FILENAME__ << " Custom aten::_copy_from() called!" << std::endl;
   TORCH_CHECK(self.is_cpu() || self.device().type() == c10::DeviceType::PrivateUse1, "Dummy test only allows copy from cpu -> dummy device.");
   TORCH_CHECK(dst.is_cpu() || dst.device().type() == c10::DeviceType::PrivateUse1, "Dummy test only allows copy from cpu -> dummy device.");
 
@@ -245,6 +263,34 @@ at::Tensor custom__copy_from(const at::Tensor& self, const at::Tensor& dst, bool
   return dst;
 }
 
+at::Tensor custom_empty_strided(
+  at::IntArrayRef size,
+  at::IntArrayRef stride,
+  std::optional<c10::ScalarType> dtype,
+  std::optional<c10::Layout> layout,
+  std::optional<c10::Device> device,
+  std::optional<bool> pin_memory) {
+
+  std::cout << __FILENAME__ << " Custom custom_empty_strided() called!" << std::endl;
+  return at::Tensor(std::move(at::detail::empty_strided_cpu(size, stride, dtype, layout, device, pin_memory)));
+}
+
+at::Tensor custom_view(const at::Tensor & self, at::IntArrayRef size){
+  std::cout << __FILENAME__ << " Custom custom_view() called!" << std::endl;
+  return at::native::view(self, size);
+}
+
+at::Tensor custom_eq_tensor_out(const at::Tensor & self, at::IntArrayRef size){
+  std::cout << __FILENAME__ << " Custom custom_view() called!" << std::endl;
+  return at::native::view(self, size);
+}
+
+void generic_mode_fallback(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
+  // override_call_count++;
+  std::cout << __FILENAME__ << " generic_mode_fallback" << std::endl;
+  c10::impl::ExcludeDispatchKeyGuard guard(c10::DispatchKey::PrivateUse1);
+  op.callBoxed(stack);
+}
 
 // This macro does the heavy lifting.
 // With TORCH_LIBRARY_IMPL, you can register custom kernels for your backend.
@@ -256,10 +302,18 @@ at::Tensor custom__copy_from(const at::Tensor& self, const at::Tensor& dst, bool
 // This macro registers your kernels to the PyTorch Dispatcher.
 // More details on the dispatcher can be found at http://blog.ezyang.com/2020/09/lets-talk-about-the-pytorch-dispatcher/.
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
-  m.impl("add.Tensor", &custom_add_Tensor);
+  // initialize device or memory?
   m.impl("empty.memory_format", &custom_empty_memory_format);
+
+  // m.impl("add.Tensor", &custom_add_Tensor);
   m.impl("fill_.Scalar", &custom_fill__scalar);
   m.impl("_copy_from", &custom__copy_from);
+  // m.impl("aten::empty_strided", &custom_empty_strided);
+  // m.impl("aten::view", torch::CppFunction::makeFromBoxedFunction<&generic_mode_fallback>());
+}
+
+TORCH_LIBRARY_IMPL(_, PrivateUse1, m) {
+  m.fallback(torch::CppFunction::makeFallthrough());
 }
 
 // This basic implementation doesn't bother dealing with different device indices

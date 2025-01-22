@@ -1,6 +1,14 @@
 import torch
 from utils.custom_device_mode import foo_module, enable_foo_device
 
+import logging
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s",
+    handlers=[logging.FileHandler("test_fixture.log"), logging.StreamHandler()],
+)
+
 # This file contains an example of how to create a custom device extension
 # in PyTorch, through the dispatcher.
 # It also shows what two possible user API's for custom devices look like. Either:
@@ -67,6 +75,7 @@ def test(x, y):
     print(f'x.device={x.device}, x.is_cpu={x.is_cpu}')
     print(f'y.device={y.device}, y.is_cpu={y.is_cpu}')
 
+    """
     # calls out custom add kernel, registered to the dispatcher
     print('Calling z = x + y')
     z = x + y
@@ -74,21 +83,27 @@ def test(x, y):
 
     print('Calling z = z.to(device="cpu")')
     z_cpu = z.to(device='cpu')
+    """
+    
+    logging.info('Calling y_device = y.to(device="foo:0")')
+    y_device = y.to(device="ttnn:0")
 
     # Check that our cross-device copy correctly copied the data to cpu
-    print(f'z_cpu.device={z_cpu.device}, z_cpu.is_cpu={z_cpu.is_cpu}')
+    logging.info(f'y_device.device={y_device.device}, y_device.is_cpu={y_device.is_cpu}')
 
+    """
     # Confirm that calling the add kernel no longer invokes our custom kernel,
     # since we're using CPU t4ensors.
     print('Calling z2 = z_cpu + z_cpu')
     z2 = z_cpu + z_cpu
+    """
     print("Test END")
     print()
 
 # Option 1: Use torch.register_privateuse1_backend("foo"), which will allow
 # "foo" as a device string to work seamlessly with pytorch's API's.
 # You may need a more recent nightly of PyTorch for this.
-torch.register_privateuse1_backend('foo')
+torch.utils.rename_privateuse1_backend('ttnn')
 
 # Show that in general, passing in a custom device string will fail.
 try:
@@ -99,19 +114,20 @@ except RuntimeError as e:
 
 # Show that in general, passing in a custom device string will fail.
 try:
-    x = torch.ones(4, 4, device='foo:2')
-    exit("Error: the foo device only has two valid indices: foo:0 and foo:1")
+    x = torch.ones(4, 4, device='ttnn:2')
+    exit("Error: the ttnn device only has two valid indices: ttnn:0 and ttnn:1")
 except RuntimeError as e:
-    print("(Correctly) unable to create tensor on device='foo:2'")
+    print("(Correctly) unable to create tensor on device='ttnn:2'")
 
-print("Creating x on device 'foo:0'")
-x1 = torch.ones(4, 4, device='foo:0')
-print("Creating y on device 'foo:0'")
-y1 = torch.ones(4, 4, device='foo:0')
+logging.info("Creating x on device 'ttnn:0'")
+x1 = torch.ones(4, 4, device='ttnn:0')
+print(x1)
+logging.info("Creating y on cpu")
+y1 = torch.ones(4, 4)
 
 test(x1, y1)
 
-
+"""
 # Option 2: Directly expose a custom device object
 # You can pass an optional index arg, specifying which device index to use.
 foo_device1 = foo_module.custom_device(1)
@@ -132,3 +148,4 @@ y2 = torch.ones(4, 4, device=foo_device1)
 # del _holder
 
 test(x2, y2)
+"""
