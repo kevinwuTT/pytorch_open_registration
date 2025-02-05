@@ -10,14 +10,107 @@
 #include <ATen/native/DispatchStub.h>
 #include <ATen/EmptyTensor.h>
 #include <ATen/ops/empty_strided.h>
-#include <ATen/ops/view.h>
+#include <ATen/ops/abs_native.h>
 
 #include <iostream>
 #include <string.h>
 
-#include "ttnn/device.hpp"
+// #include "ttnn/device.hpp"
+
+#include <ATen/native/Resize.h>
+#include <ATen/native/UnaryOps.h> // abs_stub
 
 #define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
+// use glog instead maybe?
+#define LOGGING(s) std::cout << __FILE_NAME__ << "(" << __LINE__ << ")" << "(" << __FUNCTION__ << ")" << ": " << s << std::endl
+
+static uint64_t abs_counter = 0;
+
+namespace {
+
+// Using the simplest way to obtain continuous Tensor data and process it.
+// This is a demo for using operand API, and you can add more complex logic
+// for input and output tensor based on your custom device kernel.
+
+// Taken from old version https://github.com/pytorch/pytorch/blob/f47aac6/test/cpp_extensions/open_registration_extension.cpp
+void abs_kernel(at::TensorIteratorBase& iter) {
+  LOGGING("");
+
+  // Abs only have a input tensor and a output tensor.
+  auto& output_operand = iter.operand(0);
+  auto& input_operand = iter.operand(1);
+  auto& output_tensor_base = output_operand.tensor_base();
+  auto& input_tensor_base = input_operand.tensor_base();
+  TORCH_CHECK(!input_operand.original_tensor_base().defined(),
+    "input original tensor is defined.");
+  TORCH_CHECK(!output_operand.original_tensor_base().defined(),
+    "output original tensor is defined.");
+  // For easy test, only accept contiguous input tensor for calculate.
+  auto memory_format = input_tensor_base.suggest_memory_format();
+  TORCH_CHECK(input_tensor_base.is_contiguous(memory_format),
+    "Input tensor need be contiguous.");
+  // Add necessary restrictions to ensure the security of the demo.
+  TORCH_CHECK(input_tensor_base.sizes() == output_tensor_base.sizes(),
+    "Intput and output tensor size are not equal.");
+  // Common dtype is calculate in TensorIteratorBase.
+  TORCH_CHECK(iter.common_dtype() == at::ScalarType::Float,
+    "Only support float type.")
+  // Using for loop for abs calculate.
+  auto abs_function = [](float* output_ptr, const float* input_ptr,
+                         const int64_t NUM) {
+    for (int64_t i = 0; i < NUM; ++i) {
+      *(output_ptr + i) = std::abs(*(input_ptr + i));
+    }
+  };
+  // To simplify the logic of the test demo code,
+  // we only use contiguous tensor to calculate on device side.
+  // And using input tensor memory format.
+  if (iter.is_contiguous()) {
+    // Add for will_resize flag check. You can convert to differernt
+    // tensor memory format when will_resize is True.
+    // If TensorIteratorConfig resize_outputs_ flag is true, and there are two
+    // situations:
+    // 1) Out tensor is undefined, and TensorIterator set will_resize to true;
+    // 2) Out tensor is defined and tensor size is not equal to input tensor size;
+    //    TensorIterator set will_resize to true, and call set_output_raw_strided
+    //    to resize output tensor.
+    // When output operand will_resize flag is ture, dummy
+    // device can convert tensor to dummy device preferred memory format.
+    // Here we don't convert tensor memory format, because it will become complex
+    // when dummy device want keep same memory format for training network.
+    TORCH_CHECK(output_operand.will_resize,
+      "output operand will_resize flag need be True.");
+    abs_function((float*)iter.data_ptr(0), (float*)iter.data_ptr(1), iter.numel());
+  } else {
+    // Stride copy is not support for foo device, using cpu device instead.
+    // For abs op, the last situation is: output tensor is not contiguous with
+    // operand will_resize is False.
+    TORCH_CHECK(!output_operand.will_resize, "output operand will_resize is True.");
+    // Get a contiguous tensor with input memory format.
+    at::Tensor output = at::empty(output_tensor_base.sizes(),
+                                  input_tensor_base.options()
+                                                   .memory_format(memory_format));
+    // For structured op which inheried from TensorIteratorBase, maybe you need to
+    // call set_output_raw_strided function to update output stored in op sturctured.
+    // abs op is no need to do this.
+    output_operand.exchange_tensor(c10::MaybeOwned<at::TensorBase>::owned(std::in_place, output));
+    abs_function((float*)output_operand.tensor_base().mutable_data_ptr(),
+                 (float*)iter.data_ptr(1), iter.numel());
+    // Copy tensor base to original tensor base, and keep same scalar type and
+    // stride with cpu and gpu.
+    if (output_operand.original_tensor_base().defined() &&
+        !output_operand.original_tensor_base().is_same(output_operand.tensor_base())) {
+      output_operand.original_tensor().copy_(output_operand.tensor());
+      output_operand.restore_original_tensor();
+    }
+  }
+}
+
+} // namespace
+
+namespace at::native {
+REGISTER_PRIVATEUSE1_DISPATCH(abs_stub, &abs_kernel);
+}
 
 // This file contains the heavy lifting to add a new C++ backend
 // and integrate it directly into the PyTorch backend. It mainly involves:
@@ -52,7 +145,7 @@ struct DummyCustomAllocator final : at::Allocator {
   DummyCustomAllocator() = default;
   // at::DataPtr allocate(size_t nbytes) override {
   at::DataPtr allocate(size_t nbytes) const override {
-    std::cout << __FILENAME__ << " Custom allocator's allocate() called!" << std::endl;
+    LOGGING("");
     void* data = c10::alloc_cpu(nbytes);
     return {data, data, &ReportAndDelete, at::Device(at::DeviceType::PrivateUse1, 0)};
   }
@@ -63,10 +156,10 @@ struct DummyCustomAllocator final : at::Allocator {
   // }
 
   static void ReportAndDelete(void* ptr) {
+    LOGGING("");
     if (!ptr) {
       return;
     }
-    std::cout << __FILENAME__ << " Custom allocator's delete() called!" << std::endl;
     c10::free_cpu(ptr);
   }
 
@@ -230,27 +323,24 @@ C10_REGISTER_GUARD_IMPL(PrivateUse1, DummyDeviceGuardImpl);
 // If this is the case, then this kernel is where you'll be responsible for creating and returning
 // a fresh at::Tensor object, that properly stores a TensorImpl of your subclass.
 at::Tensor custom_empty_memory_format(at::IntArrayRef size, c10::optional<at::ScalarType> dtype, c10::optional<at::Layout> layout, c10::optional<at::Device> device, c10::optional<bool> pin_memory, c10::optional<at::MemoryFormat> memory_format) {
-  const at::OptionalDeviceGuard device_guard(device);
-  std::cout << __FILENAME__ << " Custom aten::empty.memory_format() called!" << std::endl;
-  const auto device_id = 0;
-  auto& ttnn_device = ttnn::open_device(device_id);
+  // const at::OptionalDeviceGuard device_guard(device);
+  LOGGING("");
   constexpr c10::DispatchKeySet private_use_ks(c10::DispatchKey::PrivateUse1);
-  return at::detail::empty_generic(size, &global_custom_alloc, private_use_ks, c10::dtype_or_default(dtype), memory_format);
+  auto empty_generic = at::detail::empty_generic(size, &global_custom_alloc, private_use_ks, c10::dtype_or_default(dtype), memory_format);
+  return empty_generic;
 }
 
 at::Tensor & custom_fill__scalar(at::Tensor & self, const at::Scalar & value) {
-  const at::OptionalDeviceGuard device_guard(at::device_of(self));
-  // Not bothering to implement.
-  // Should fill the tensor's data with "value".
-  std::cout << self << std::endl;
-
+  // const at::OptionalDeviceGuard device_guard(at::device_of(self));
+  LOGGING("");
+  // return at::native::fill_(self, value);
   return self;
 }
 
 // basic dummy copy_() function, so we can copy from the custom device to/from CPU
 at::Tensor custom__copy_from(const at::Tensor& self, const at::Tensor& dst, bool non_blocking) {
   const at::OptionalDeviceGuard device_guard(at::device_of(self));
-  std::cout << __FILENAME__ << " Custom aten::_copy_from() called!" << std::endl;
+  LOGGING("");
   TORCH_CHECK(self.is_cpu() || self.device().type() == c10::DeviceType::PrivateUse1, "Dummy test only allows copy from cpu -> dummy device.");
   TORCH_CHECK(dst.is_cpu() || dst.device().type() == c10::DeviceType::PrivateUse1, "Dummy test only allows copy from cpu -> dummy device.");
 
@@ -263,33 +353,46 @@ at::Tensor custom__copy_from(const at::Tensor& self, const at::Tensor& dst, bool
   return dst;
 }
 
-at::Tensor custom_empty_strided(
-  at::IntArrayRef size,
-  at::IntArrayRef stride,
-  std::optional<c10::ScalarType> dtype,
-  std::optional<c10::Layout> layout,
-  std::optional<c10::Device> device,
-  std::optional<bool> pin_memory) {
+at::Tensor custom_empty_strided(c10::IntArrayRef size,
+                                c10::IntArrayRef stride,
+                                c10::optional<at::ScalarType> dtype_opt,
+                                c10::optional<at::Layout> layout_opt,
+                                c10::optional<at::Device> device_opt,
+                                c10::optional<bool> pin_memory_opt) {
 
-  std::cout << __FILENAME__ << " Custom custom_empty_strided() called!" << std::endl;
-  return at::Tensor(std::move(at::detail::empty_strided_cpu(size, stride, dtype, layout, device, pin_memory)));
+  LOGGING("");
+  constexpr c10::DispatchKeySet private_use_ks(c10::DispatchKey::PrivateUse1);
+  auto dtype = c10::dtype_or_default(dtype_opt);
+  return  at::detail::empty_strided_generic(size, stride, &global_custom_alloc, private_use_ks, dtype);
 }
 
-at::Tensor custom_view(const at::Tensor & self, at::IntArrayRef size){
-  std::cout << __FILENAME__ << " Custom custom_view() called!" << std::endl;
-  return at::native::view(self, size);
+at::Tensor& custom_abs_out(const at::Tensor& self, at::Tensor& out) {
+  LOGGING("");
+  return at::native::abs_out(self, out);
 }
 
-at::Tensor custom_eq_tensor_out(const at::Tensor & self, at::IntArrayRef size){
-  std::cout << __FILENAME__ << " Custom custom_view() called!" << std::endl;
-  return at::native::view(self, size);
-}
-
-void generic_mode_fallback(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
-  // override_call_count++;
-  std::cout << __FILENAME__ << " generic_mode_fallback" << std::endl;
-  c10::impl::ExcludeDispatchKeyGuard guard(c10::DispatchKey::PrivateUse1);
-  op.callBoxed(stack);
+const at::Tensor& custom_resize_(const at::Tensor& self, at::IntArrayRef size,
+                          std::optional<at::MemoryFormat> optional_memory_format) {
+  LOGGING("");
+  at::TensorImpl* tensor_impl = self.unsafeGetTensorImpl();
+  tensor_impl->set_sizes_contiguous(size);
+  const auto itemsize = tensor_impl->dtype().itemsize();
+  const auto offset = tensor_impl->storage_offset();
+  const auto storage_size = at::detail::computeStorageNbytesContiguous(size, itemsize, offset);
+  // Dummy device is using cpu allocator, so here just call cpu
+  // function maybe_resize_storage_cpu in aten/src/ATen/native/Resize.h
+  // to get a sufficient memory space.
+  at::native::maybe_resize_storage_cpu(tensor_impl, storage_size);
+  if (optional_memory_format.has_value()) {
+    auto memory_format =
+        optional_memory_format.value();
+    TORCH_CHECK(
+        memory_format != at::MemoryFormat::Preserve,
+        "Unsupported memory format",
+        memory_format);
+    tensor_impl->empty_tensor_restride(memory_format);
+  }
+  return self;
 }
 
 // This macro does the heavy lifting.
@@ -302,18 +405,12 @@ void generic_mode_fallback(const c10::OperatorHandle& op, torch::jit::Stack* sta
 // This macro registers your kernels to the PyTorch Dispatcher.
 // More details on the dispatcher can be found at http://blog.ezyang.com/2020/09/lets-talk-about-the-pytorch-dispatcher/.
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
-  // initialize device or memory?
   m.impl("empty.memory_format", &custom_empty_memory_format);
-
-  // m.impl("add.Tensor", &custom_add_Tensor);
   m.impl("fill_.Scalar", &custom_fill__scalar);
   m.impl("_copy_from", &custom__copy_from);
-  // m.impl("aten::empty_strided", &custom_empty_strided);
-  // m.impl("aten::view", torch::CppFunction::makeFromBoxedFunction<&generic_mode_fallback>());
-}
-
-TORCH_LIBRARY_IMPL(_, PrivateUse1, m) {
-  m.fallback(torch::CppFunction::makeFallthrough());
+  m.impl("aten::empty_strided", &custom_empty_strided);
+  m.impl("abs.out", &custom_abs_out); 
+  m.impl("resize_", &custom_resize_);
 }
 
 // This basic implementation doesn't bother dealing with different device indices

@@ -2,11 +2,12 @@ import torch
 from utils.custom_device_mode import foo_module, enable_foo_device
 
 import logging
+import sys
 
 logging.basicConfig(
     level=logging.DEBUG,
-    format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s",
-    handlers=[logging.FileHandler("test_fixture.log"), logging.StreamHandler()],
+    format="%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s",
+    handlers=[logging.FileHandler("test_fixture.log"), logging.StreamHandler(sys.stdout)],
 )
 
 # This file contains an example of how to create a custom device extension
@@ -72,8 +73,8 @@ def test(x, y):
     print()
     print("Test START")
     # Check that our device is correct.
-    print(f'x.device={x.device}, x.is_cpu={x.is_cpu}')
-    print(f'y.device={y.device}, y.is_cpu={y.is_cpu}')
+    # print(f'x.device={x.device}, x.is_cpu={x.is_cpu}')
+    # print(f'y.device={y.device}, y.is_cpu={y.is_cpu}')
 
     """
     # calls out custom add kernel, registered to the dispatcher
@@ -105,27 +106,42 @@ def test(x, y):
 # You may need a more recent nightly of PyTorch for this.
 torch.utils.rename_privateuse1_backend('ttnn')
 
-# Show that in general, passing in a custom device string will fail.
-try:
-    x = torch.ones(4, 4, device='bar')
-    exit("Error: you should not be able to make a tensor on an arbitrary 'bar' device.")
-except RuntimeError as e:
-    print("(Correctly) unable to create tensor on device='bar'")
+# # Show that in general, passing in a custom device string will fail.
+# try:
+#     x = torch.ones(4, 4, device='bar')
+#     exit("Error: you should not be able to make a tensor on an arbitrary 'bar' device.")
+# except RuntimeError as e:
+#     print("(Correctly) unable to create tensor on device='bar'")
 
-# Show that in general, passing in a custom device string will fail.
-try:
-    x = torch.ones(4, 4, device='ttnn:2')
-    exit("Error: the ttnn device only has two valid indices: ttnn:0 and ttnn:1")
-except RuntimeError as e:
-    print("(Correctly) unable to create tensor on device='ttnn:2'")
+# # Show that in general, passing in a custom device string will fail.
+# try:
+#     x = torch.ones(4, 4, device='ttnn:2')
+#     exit("Error: the ttnn device only has two valid indices: ttnn:0 and ttnn:1")
+# except RuntimeError as e:
+#     print("(Correctly) unable to create tensor on device='ttnn:2'")
 
-logging.info("Creating x on device 'ttnn:0'")
-x1 = torch.ones(4, 4, device='ttnn:0')
+logging.info("Creating negative ones on cpu")
+x1 = torch.neg(torch.ones(4, 4, device = "cpu"))
 print(x1)
-logging.info("Creating y on cpu")
-y1 = torch.ones(4, 4)
+logging.info("Transferring to ttnn")
+x1 = x1.to("ttnn")
+logging.info("Running abs on ttnn")
+x1 = torch.abs(x1)
+logging.info("Transferring back to cpu")
+x1 = x1.to("cpu")
+logging.info("Print cpu result")
+print(x1)
 
-test(x1, y1)
+# logging.info("Creating ones on device 'ttnn'")
+# x1 = torch.ones(4, 4, device='ttnn')
+# logging.info("Transferring to cpu")
+# x1_cpu = x1.to("cpu")
+# logging.info("Trying to print x1_cpu")
+# print(x1_cpu)
+# logging.info("Creating y on cpu")
+# y1 = torch.ones(4, 4)
+
+# test(x1, y1)
 
 """
 # Option 2: Directly expose a custom device object

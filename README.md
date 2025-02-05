@@ -55,7 +55,7 @@ Obtain the following in some way:
 
 1. Build and install pytorch with clang-17, c++20, and libc++
     ```
-    CC=clang-17 CXX=clang++-17 CXXFLAGS="-std=c++20 -stdlib=libc++" python setup.py install
+    DEBUG=1 CC=clang-17 CXX=clang++-17 CXXFLAGS="-std=c++20 -stdlib=libc++" python setup.py develop
     ```
 
 That should be enough. Pytorch should now be installed in the current virtual environment.
